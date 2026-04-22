@@ -220,6 +220,7 @@ function ViewMenu() {
   }, [open]);
 
   const order: PanelKey[] = ['leftToolbar', 'canvas', 'layers', 'properties', 'effects'];
+  const overlays: PanelKey[] = ['rulers', 'guides'];
   const allOn = order.every((k) => panels[k]);
 
   return (
@@ -237,6 +238,17 @@ function ViewMenu() {
             >
               <span className="w-3 text-accent">{panels[k] ? '✓' : ''}</span>
               <span>{PANEL_LABELS[k]}</span>
+            </button>
+          ))}
+          <div className="my-1 h-px bg-black/40" />
+          {overlays.map((k) => (
+            <button
+              key={k}
+              onClick={() => toggle(k)}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-zinc-200 hover:bg-panel-3"
+            >
+              <span className="w-3 text-accent">{panels[k] ? '✓' : ''}</span>
+              <span>Show {PANEL_LABELS[k].toLowerCase()}</span>
             </button>
           ))}
           <div className="my-1 h-px bg-black/40" />

@@ -46,7 +46,7 @@ export async function importImageFiles(files: FileList | File[]): Promise<void> 
     // Use data URLs so the image survives reload (blob: URLs are session-scoped).
     const url = await readFileAsDataURL(file);
     const dims = await readImageDimensions(url);
-    useEditor.getState().addImageLayer(url, dims.width, dims.height, file.name);
+    useEditor.getState().addImageObject(url, dims.width, dims.height, file.name);
   }
 }
 

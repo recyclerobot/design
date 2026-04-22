@@ -4,16 +4,19 @@ import type {
   CanvasDoc,
   Effect,
   EffectKind,
-  ImageLayer,
+  Guide,
+  ImageObject,
   Layer,
+  LayerObject,
   ShapeKind,
-  ShapeLayer,
-  TextLayer,
+  ShapeObject,
+  TextObject,
   ViewState,
 } from './types';
 import { DEFAULT_DOC } from './types';
 import { defaultEffectFor } from './effects';
 import { measureText } from './text';
+import { migrateDoc } from './migration';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -24,7 +27,12 @@ interface HistoryEntry {
 interface EditorState {
   doc: CanvasDoc;
   view: ViewState;
+  /** Active layer (the container objects are added to). */
   selectedLayerId: string | null;
+  /** Primary selected drawable (or null). */
+  selectedObjectId: string | null;
+  /** Additional objects in the active layer for marquee multi-select. */
+  additionalSelectedObjectIds: string[];
   past: HistoryEntry[];
   future: HistoryEntry[];
 
@@ -34,31 +42,48 @@ interface EditorState {
   setCanvasSize: (widthPx: number, heightPx: number) => void;
   setBackgroundColor: (color: string | null) => void;
 
-  // layers
-  addImageLayer: (
+  // layers (containers)
+  addLayer: (name?: string) => string;
+  removeLayer: (id: string) => void;
+  duplicateLayer: (id: string) => void;
+  reorderLayer: (id: string, delta: number) => void;
+  moveLayerToIndex: (id: string, targetIndex: number) => void;
+  updateLayer: (id: string, patch: Partial<Layer>) => void;
+  selectLayer: (id: string | null) => void;
+
+  // objects (drawables within layers)
+  addImageObject: (
     src: string,
     naturalWidth: number,
     naturalHeight: number,
     name?: string,
   ) => string;
-  addTextLayer: (text?: string) => string;
-  addShapeLayer: (shape: ShapeKind) => string;
-  addEmptyLayer: () => string;
-  updateLayer: (id: string, patch: Partial<Layer>) => void;
-  removeLayer: (id: string) => void;
-  duplicateLayer: (id: string) => void;
-  reorderLayer: (id: string, delta: number) => void;
-  /**
-   * Move a layer to an absolute target index in the bottom-up `doc.layers`
-   * array (0 = back-most). Used by drag-to-reorder in the Layers panel.
-   */
-  moveLayerToIndex: (id: string, targetIndex: number) => void;
-  selectLayer: (id: string | null) => void;
+  addTextObject: (text?: string) => string;
+  addShapeObject: (shape: ShapeKind) => string;
+  updateObject: (id: string, patch: Partial<LayerObject>) => void;
+  removeObject: (id: string) => void;
+  duplicateObject: (id: string) => void;
+  reorderObject: (id: string, delta: number) => void;
+  /** Move object within its layer to an absolute index. */
+  moveObjectToIndex: (id: string, targetIndex: number) => void;
+  /** Move object across layers, optionally to a target index in the new layer. */
+  moveObjectToLayer: (id: string, targetLayerId: string, targetIndex?: number) => void;
 
-  // effects
-  addEffect: (layerId: string, kind: EffectKind) => void;
-  updateEffect: (layerId: string, effectId: string, patch: Partial<Effect>) => void;
-  removeEffect: (layerId: string, effectId: string) => void;
+  selectObject: (id: string | null) => void;
+  setObjectSelection: (primary: string | null, additional?: string[]) => void;
+  toggleAdditionalObjectSelected: (id: string) => void;
+  clearAdditionalObjectSelection: () => void;
+
+  // effects (per object)
+  addEffect: (objectId: string, kind: EffectKind) => void;
+  updateEffect: (objectId: string, effectId: string, patch: Partial<Effect>) => void;
+  removeEffect: (objectId: string, effectId: string) => void;
+
+  // guides (per document)
+  addGuide: (g: Guide) => void;
+  updateGuide: (index: number, g: Guide) => void;
+  removeGuide: (index: number) => void;
+  clearGuides: () => void;
 
   // view
   setView: (patch: Partial<ViewState>) => void;
@@ -72,14 +97,59 @@ interface EditorState {
 
 const HISTORY_MAX = 50;
 
+const cloneEffect = (e: Effect): Effect => ({ ...e, params: { ...e.params } }) as Effect;
+
+const cloneObject = (o: LayerObject): LayerObject =>
+  ({ ...o, effects: o.effects.map(cloneEffect) }) as LayerObject;
+
+const cloneLayer = (l: Layer): Layer => ({
+  ...l,
+  objects: l.objects.map(cloneObject),
+});
+
 const cloneDoc = (doc: CanvasDoc): CanvasDoc => ({
   widthPx: doc.widthPx,
   heightPx: doc.heightPx,
   backgroundColor: doc.backgroundColor,
-  layers: doc.layers.map((l) => ({
-    ...l,
-    effects: l.effects.map((e) => ({ ...e, params: { ...e.params } })),
-  })) as Layer[],
+  layers: doc.layers.map(cloneLayer),
+  guides: (doc.guides ?? []).map((g) => ({ ...g })),
+});
+
+/** Find the layer containing an object id (returns layer index + object index). */
+function findObject(
+  doc: CanvasDoc,
+  objectId: string,
+): { layer: Layer; layerIndex: number; objectIndex: number } | null {
+  for (let li = 0; li < doc.layers.length; li++) {
+    const layer = doc.layers[li];
+    const oi = layer.objects.findIndex((o) => o.id === objectId);
+    if (oi >= 0) return { layer, layerIndex: li, objectIndex: oi };
+  }
+  return null;
+}
+
+function freshLayer(name: string): Layer {
+  return {
+    id: uid(),
+    name,
+    visible: true,
+    locked: false,
+    opacity: 1,
+    blendMode: 'normal',
+    objects: [],
+  };
+}
+
+const baseObjectDefaults = (): Pick<
+  LayerObject,
+  'rotation' | 'opacity' | 'visible' | 'locked' | 'blendMode' | 'effects'
+> => ({
+  rotation: 0,
+  opacity: 1,
+  visible: true,
+  locked: false,
+  blendMode: 'normal',
+  effects: [],
 });
 
 export const useEditor = create<EditorState>()(
@@ -90,36 +160,72 @@ export const useEditor = create<EditorState>()(
       set({ doc: mutator(cloneDoc(doc)), past: nextPast, future: [] });
     };
 
+    /**
+     * Get the active layer; if none exists or none is selected, create a
+     * new one and make it active. Returns the layer id.
+     *
+     * Note: this is intended to be called *before* a `recordAnd` mutation
+     * so the new layer is part of the same history entry.
+     */
+    const ensureActiveLayerId = (mutator: (doc: CanvasDoc) => Layer): string => {
+      const s = get();
+      const existing = s.doc.layers.find((l) => l.id === s.selectedLayerId);
+      if (existing) return existing.id;
+      // Create one inline and select it (without recording — the caller will
+      // wrap the full operation in a single recordAnd).
+      const layer = mutator(s.doc);
+      set({
+        doc: { ...s.doc, layers: [...s.doc.layers, layer] },
+        selectedLayerId: layer.id,
+      });
+      return layer.id;
+    };
+
     return {
       doc: DEFAULT_DOC,
       view: { zoom: 1, panX: 0, panY: 0 },
       selectedLayerId: null,
+      selectedObjectId: null,
+      additionalSelectedObjectIds: [],
       past: [],
       future: [],
 
       setDoc: (doc, options) => {
+        const safe: CanvasDoc = migrateDoc(doc);
         if (options?.record !== false) {
           const { past, doc: prev } = get();
           set({
-            doc,
+            doc: safe,
             past: [...past, { doc: cloneDoc(prev) }].slice(-HISTORY_MAX),
             future: [],
+            selectedLayerId: safe.layers[safe.layers.length - 1]?.id ?? null,
+            selectedObjectId: null,
+            additionalSelectedObjectIds: [],
           });
         } else {
-          set({ doc });
+          set({
+            doc: safe,
+            selectedLayerId: safe.layers[safe.layers.length - 1]?.id ?? null,
+            selectedObjectId: null,
+            additionalSelectedObjectIds: [],
+          });
         }
       },
 
       newDoc: (widthPx, heightPx, backgroundColor) => {
         // revoke any object URLs
-        get().doc.layers.forEach((l) => {
-          if (l.type === 'image' && l.src.startsWith('blob:')) URL.revokeObjectURL(l.src);
-        });
+        get().doc.layers.forEach((l) =>
+          l.objects.forEach((o) => {
+            if (o.type === 'image' && o.src.startsWith('blob:')) URL.revokeObjectURL(o.src);
+          }),
+        );
         set({
-          doc: { widthPx, heightPx, backgroundColor, layers: [] },
+          doc: { widthPx, heightPx, backgroundColor, layers: [], guides: [] },
           past: [],
           future: [],
           selectedLayerId: null,
+          selectedObjectId: null,
+          additionalSelectedObjectIds: [],
         });
       },
 
@@ -127,134 +233,35 @@ export const useEditor = create<EditorState>()(
 
       setBackgroundColor: (color) => recordAnd((d) => ({ ...d, backgroundColor: color })),
 
-      addImageLayer: (src, naturalWidth, naturalHeight, name) => {
-        const id = uid();
-        const { doc } = get();
-        // fit while preserving aspect, max 80% of canvas
-        const maxW = doc.widthPx * 0.8;
-        const maxH = doc.heightPx * 0.8;
-        const scale = Math.min(1, maxW / naturalWidth, maxH / naturalHeight);
-        const w = naturalWidth * scale;
-        const h = naturalHeight * scale;
-        const layer: ImageLayer = {
-          id,
-          name: name ?? 'Image',
-          type: 'image',
-          src,
-          naturalWidth,
-          naturalHeight,
-          x: (doc.widthPx - w) / 2,
-          y: (doc.heightPx - h) / 2,
-          width: w,
-          height: h,
-          rotation: 0,
-          opacity: 1,
-          visible: true,
-          locked: false,
-          blendMode: 'normal',
-          effects: [],
-        };
+      // ---------------- layer-container ops ----------------
+
+      addLayer: (name) => {
+        const layer = freshLayer(name ?? `Layer ${get().doc.layers.length + 1}`);
         recordAnd((d) => ({ ...d, layers: [...d.layers, layer] }));
-        set({ selectedLayerId: id });
-        return id;
+        set({
+          selectedLayerId: layer.id,
+          selectedObjectId: null,
+          additionalSelectedObjectIds: [],
+        });
+        return layer.id;
       },
-
-      addTextLayer: (text = 'Text') => {
-        const id = uid();
-        const { doc } = get();
-        const fontFamily = 'Inter, system-ui, sans-serif';
-        const fontSize = 64;
-        const fontWeight = 600;
-        const measured = measureText(text, fontFamily, fontSize, fontWeight);
-        const w = Math.max(20, measured.width);
-        const h = Math.max(20, measured.height);
-        const layer: TextLayer = {
-          id,
-          name: 'Text',
-          type: 'text',
-          text,
-          fontFamily,
-          fontSize,
-          fontWeight,
-          color: '#ffffff',
-          align: 'left',
-          x: doc.widthPx / 2 - w / 2,
-          y: doc.heightPx / 2 - h / 2,
-          width: w,
-          height: h,
-          rotation: 0,
-          opacity: 1,
-          visible: true,
-          locked: false,
-          blendMode: 'normal',
-          effects: [],
-        };
-        recordAnd((d) => ({ ...d, layers: [...d.layers, layer] }));
-        set({ selectedLayerId: id });
-        return id;
-      },
-
-      addShapeLayer: (shape) => {
-        const id = uid();
-        const { doc } = get();
-        const w = shape === 'line' ? Math.min(400, doc.widthPx * 0.5) : 240;
-        const h = shape === 'line' ? 4 : 240;
-        const layer: ShapeLayer = {
-          id,
-          name: shape === 'empty' ? 'Empty' : shape[0].toUpperCase() + shape.slice(1),
-          type: 'shape',
-          shape,
-          fillColor: shape === 'empty' || shape === 'line' ? null : '#5865f2',
-          strokeColor: shape === 'line' ? '#ffffff' : null,
-          strokeWidth: shape === 'line' ? 4 : 0,
-          cornerRadius: 0,
-          x: (doc.widthPx - w) / 2,
-          y: (doc.heightPx - h) / 2,
-          width: w,
-          height: h,
-          rotation: 0,
-          opacity: 1,
-          visible: true,
-          locked: false,
-          blendMode: 'normal',
-          effects: [],
-        };
-        recordAnd((d) => ({ ...d, layers: [...d.layers, layer] }));
-        set({ selectedLayerId: id });
-        return id;
-      },
-
-      addEmptyLayer: () => get().addShapeLayer('empty'),
-
-      updateLayer: (id, patch) =>
-        recordAnd((d) => ({
-          ...d,
-          layers: d.layers.map((l) => {
-            if (l.id !== id) return l;
-            const merged = { ...l, ...patch } as Layer;
-            // Text layers auto-size to their measured glyph bounds so the
-            // bounding box always matches the rendered text and never squashes.
-            if (merged.type === 'text') {
-              const m = measureText(
-                merged.text,
-                merged.fontFamily,
-                merged.fontSize,
-                merged.fontWeight,
-              );
-              merged.width = m.width;
-              merged.height = m.height;
-            }
-            return merged;
-          }),
-        })),
 
       removeLayer: (id) => {
         const layer = get().doc.layers.find((l) => l.id === id);
-        if (layer?.type === 'image' && layer.src.startsWith('blob:')) {
-          URL.revokeObjectURL(layer.src);
+        if (layer) {
+          for (const o of layer.objects) {
+            if (o.type === 'image' && o.src.startsWith('blob:')) URL.revokeObjectURL(o.src);
+          }
         }
         recordAnd((d) => ({ ...d, layers: d.layers.filter((l) => l.id !== id) }));
-        if (get().selectedLayerId === id) set({ selectedLayerId: null });
+        const s = get();
+        const patch: Partial<EditorState> = {};
+        if (s.selectedLayerId === id) {
+          patch.selectedLayerId = s.doc.layers[s.doc.layers.length - 1]?.id ?? null;
+          patch.selectedObjectId = null;
+          patch.additionalSelectedObjectIds = [];
+        }
+        if (Object.keys(patch).length) set(patch);
       },
 
       duplicateLayer: (id) => {
@@ -262,19 +269,18 @@ export const useEditor = create<EditorState>()(
         if (!src) return;
         const newId = uid();
         const copy: Layer = {
-          ...(src as Layer),
+          ...cloneLayer(src),
           id: newId,
           name: `${src.name} copy`,
-          x: src.x + 24,
-          y: src.y + 24,
-          effects: src.effects.map((e) => ({
-            ...e,
+          objects: src.objects.map((o) => ({
+            ...cloneObject(o),
             id: uid(),
-            params: { ...e.params },
-          })) as Effect[],
-        } as Layer;
+            x: o.x + 24,
+            y: o.y + 24,
+          })),
+        };
         recordAnd((d) => ({ ...d, layers: [...d.layers, copy] }));
-        set({ selectedLayerId: newId });
+        set({ selectedLayerId: newId, selectedObjectId: null, additionalSelectedObjectIds: [] });
       },
 
       reorderLayer: (id, delta) =>
@@ -295,7 +301,6 @@ export const useEditor = create<EditorState>()(
           if (idx < 0) return d;
           const next = [...d.layers];
           const [item] = next.splice(idx, 1);
-          // After removal, clamp target into remaining range.
           const t = Math.max(
             0,
             Math.min(next.length, targetIndex > idx ? targetIndex - 1 : targetIndex),
@@ -305,48 +310,372 @@ export const useEditor = create<EditorState>()(
           return { ...d, layers: next };
         }),
 
-      selectLayer: (id) => set({ selectedLayerId: id }),
+      updateLayer: (id, patch) =>
+        recordAnd((d) => ({
+          ...d,
+          layers: d.layers.map((l) => (l.id === id ? ({ ...l, ...patch } as Layer) : l)),
+        })),
 
-      addEffect: (layerId, kind) =>
+      selectLayer: (id) => {
+        const s = get();
+        // If switching layer, drop object selection that no longer belongs here.
+        const sel = s.selectedObjectId;
+        const layer = id ? s.doc.layers.find((l) => l.id === id) : null;
+        const objIds = new Set(layer?.objects.map((o) => o.id) ?? []);
+        set({
+          selectedLayerId: id,
+          selectedObjectId: sel && objIds.has(sel) ? sel : null,
+          additionalSelectedObjectIds: s.additionalSelectedObjectIds.filter((x) => objIds.has(x)),
+        });
+      },
+
+      // ---------------- object ops ----------------
+
+      addImageObject: (src, naturalWidth, naturalHeight, name) => {
+        const id = uid();
+        const { doc } = get();
+        const maxW = doc.widthPx * 0.8;
+        const maxH = doc.heightPx * 0.8;
+        const scale = Math.min(1, maxW / naturalWidth, maxH / naturalHeight);
+        const w = naturalWidth * scale;
+        const h = naturalHeight * scale;
+        const obj: ImageObject = {
+          ...baseObjectDefaults(),
+          id,
+          name: name ?? 'Image',
+          type: 'image',
+          src,
+          naturalWidth,
+          naturalHeight,
+          x: (doc.widthPx - w) / 2,
+          y: (doc.heightPx - h) / 2,
+          width: w,
+          height: h,
+        };
+        const layerId = ensureActiveLayerId(() => freshLayer('Layer 1'));
         recordAnd((d) => ({
           ...d,
           layers: d.layers.map((l) =>
-            l.id === layerId
-              ? ({ ...l, effects: [...l.effects, defaultEffectFor(kind, uid())] } as Layer)
-              : l,
+            l.id === layerId ? { ...l, objects: [...l.objects, obj] } : l,
           ),
-        })),
+        }));
+        set({ selectedObjectId: id, additionalSelectedObjectIds: [] });
+        return id;
+      },
 
-      updateEffect: (layerId, effectId, patch) =>
+      addTextObject: (text = 'Text') => {
+        const id = uid();
+        const { doc } = get();
+        const fontFamily = 'Inter, system-ui, sans-serif';
+        const fontSize = 64;
+        const fontWeight = 600;
+        const measured = measureText(text, fontFamily, fontSize, fontWeight);
+        const w = Math.max(20, measured.width);
+        const h = Math.max(20, measured.height);
+        const obj: TextObject = {
+          ...baseObjectDefaults(),
+          id,
+          name: 'Text',
+          type: 'text',
+          text,
+          fontFamily,
+          fontSize,
+          fontWeight,
+          color: '#ffffff',
+          align: 'left',
+          x: doc.widthPx / 2 - w / 2,
+          y: doc.heightPx / 2 - h / 2,
+          width: w,
+          height: h,
+        };
+        const layerId = ensureActiveLayerId(() => freshLayer('Layer 1'));
         recordAnd((d) => ({
           ...d,
           layers: d.layers.map((l) =>
-            l.id === layerId
-              ? ({
-                  ...l,
-                  effects: l.effects.map((e) =>
-                    e.id === effectId
-                      ? ({
-                          ...e,
-                          ...patch,
-                          params: { ...e.params, ...(patch as any).params },
-                        } as Effect)
-                      : e,
-                  ),
-                } as Layer)
-              : l,
+            l.id === layerId ? { ...l, objects: [...l.objects, obj] } : l,
           ),
-        })),
+        }));
+        set({ selectedObjectId: id, additionalSelectedObjectIds: [] });
+        return id;
+      },
 
-      removeEffect: (layerId, effectId) =>
+      addShapeObject: (shape) => {
+        const id = uid();
+        const { doc } = get();
+        const w = shape === 'line' ? Math.min(400, doc.widthPx * 0.5) : 240;
+        const h = shape === 'line' ? 4 : 240;
+        const obj: ShapeObject = {
+          ...baseObjectDefaults(),
+          id,
+          name: shape === 'empty' ? 'Empty' : shape[0].toUpperCase() + shape.slice(1),
+          type: 'shape',
+          shape,
+          fillColor: shape === 'empty' || shape === 'line' ? null : '#5865f2',
+          strokeColor: shape === 'line' ? '#ffffff' : null,
+          strokeWidth: shape === 'line' ? 4 : 0,
+          cornerRadius: 0,
+          x: (doc.widthPx - w) / 2,
+          y: (doc.heightPx - h) / 2,
+          width: w,
+          height: h,
+        };
+        const layerId = ensureActiveLayerId(() => freshLayer('Layer 1'));
         recordAnd((d) => ({
           ...d,
           layers: d.layers.map((l) =>
-            l.id === layerId
-              ? ({ ...l, effects: l.effects.filter((e) => e.id !== effectId) } as Layer)
-              : l,
+            l.id === layerId ? { ...l, objects: [...l.objects, obj] } : l,
           ),
+        }));
+        set({ selectedObjectId: id, additionalSelectedObjectIds: [] });
+        return id;
+      },
+
+      updateObject: (id, patch) =>
+        recordAnd((d) => ({
+          ...d,
+          layers: d.layers.map((l) => ({
+            ...l,
+            objects: l.objects.map((o) => {
+              if (o.id !== id) return o;
+              const merged = { ...o, ...patch } as LayerObject;
+              if (merged.type === 'text') {
+                const m = measureText(
+                  merged.text,
+                  merged.fontFamily,
+                  merged.fontSize,
+                  merged.fontWeight,
+                );
+                merged.width = m.width;
+                merged.height = m.height;
+              }
+              return merged;
+            }),
+          })),
         })),
+
+      removeObject: (id) => {
+        const found = findObject(get().doc, id);
+        if (!found) return;
+        const o = found.layer.objects[found.objectIndex];
+        if (o.type === 'image' && o.src.startsWith('blob:')) URL.revokeObjectURL(o.src);
+        recordAnd((d) => ({
+          ...d,
+          layers: d.layers.map((l) =>
+            l.id === found.layer.id ? { ...l, objects: l.objects.filter((x) => x.id !== id) } : l,
+          ),
+        }));
+        const s = get();
+        const patch: Partial<EditorState> = {};
+        if (s.selectedObjectId === id) patch.selectedObjectId = null;
+        if (s.additionalSelectedObjectIds.includes(id)) {
+          patch.additionalSelectedObjectIds = s.additionalSelectedObjectIds.filter((x) => x !== id);
+        }
+        if (Object.keys(patch).length) set(patch);
+      },
+
+      duplicateObject: (id) => {
+        const found = findObject(get().doc, id);
+        if (!found) return;
+        const src = found.layer.objects[found.objectIndex];
+        const newId = uid();
+        const copy: LayerObject = {
+          ...cloneObject(src),
+          id: newId,
+          name: `${src.name} copy`,
+          x: src.x + 24,
+          y: src.y + 24,
+        };
+        recordAnd((d) => ({
+          ...d,
+          layers: d.layers.map((l) =>
+            l.id === found.layer.id ? { ...l, objects: [...l.objects, copy] } : l,
+          ),
+        }));
+        set({ selectedObjectId: newId });
+      },
+
+      reorderObject: (id, delta) =>
+        recordAnd((d) => ({
+          ...d,
+          layers: d.layers.map((l) => {
+            const idx = l.objects.findIndex((o) => o.id === id);
+            if (idx < 0) return l;
+            const next = [...l.objects];
+            const target = Math.max(0, Math.min(next.length - 1, idx + delta));
+            if (target === idx) return l;
+            const [item] = next.splice(idx, 1);
+            next.splice(target, 0, item);
+            return { ...l, objects: next };
+          }),
+        })),
+
+      moveObjectToIndex: (id, targetIndex) =>
+        recordAnd((d) => ({
+          ...d,
+          layers: d.layers.map((l) => {
+            const idx = l.objects.findIndex((o) => o.id === id);
+            if (idx < 0) return l;
+            const next = [...l.objects];
+            const [item] = next.splice(idx, 1);
+            const t = Math.max(
+              0,
+              Math.min(next.length, targetIndex > idx ? targetIndex - 1 : targetIndex),
+            );
+            if (t === idx) return l;
+            next.splice(t, 0, item);
+            return { ...l, objects: next };
+          }),
+        })),
+
+      moveObjectToLayer: (id, targetLayerId, targetIndex) =>
+        recordAnd((d) => {
+          const found = findObject(d, id);
+          if (!found || found.layer.id === targetLayerId) return d;
+          const obj = found.layer.objects[found.objectIndex];
+          return {
+            ...d,
+            layers: d.layers.map((l) => {
+              if (l.id === found.layer.id) {
+                return { ...l, objects: l.objects.filter((o) => o.id !== id) };
+              }
+              if (l.id === targetLayerId) {
+                const next = [...l.objects];
+                const t =
+                  typeof targetIndex === 'number'
+                    ? Math.max(0, Math.min(next.length, targetIndex))
+                    : next.length;
+                next.splice(t, 0, obj);
+                return { ...l, objects: next };
+              }
+              return l;
+            }),
+          };
+        }),
+
+      // ---------------- selection ----------------
+
+      selectObject: (id) => {
+        if (id == null) {
+          set({ selectedObjectId: null, additionalSelectedObjectIds: [] });
+          return;
+        }
+        const found = findObject(get().doc, id);
+        if (!found) return;
+        set({
+          selectedObjectId: id,
+          selectedLayerId: found.layer.id,
+          additionalSelectedObjectIds: [],
+        });
+      },
+
+      setObjectSelection: (primary, additional) => {
+        if (primary == null) {
+          set({ selectedObjectId: null, additionalSelectedObjectIds: [] });
+          return;
+        }
+        const found = findObject(get().doc, primary);
+        if (!found) return;
+        // additional must live in the same layer as primary.
+        const sameLayerIds = new Set(found.layer.objects.map((o) => o.id));
+        set({
+          selectedObjectId: primary,
+          selectedLayerId: found.layer.id,
+          additionalSelectedObjectIds: (additional ?? []).filter(
+            (x) => x !== primary && sameLayerIds.has(x),
+          ),
+        });
+      },
+
+      toggleAdditionalObjectSelected: (id) =>
+        set((s) => {
+          if (id === s.selectedObjectId) return s;
+          const found = findObject(s.doc, id);
+          if (!found || found.layer.id !== s.selectedLayerId) return s;
+          const has = s.additionalSelectedObjectIds.includes(id);
+          return {
+            additionalSelectedObjectIds: has
+              ? s.additionalSelectedObjectIds.filter((x) => x !== id)
+              : [...s.additionalSelectedObjectIds, id],
+          };
+        }),
+
+      clearAdditionalObjectSelection: () => set({ additionalSelectedObjectIds: [] }),
+
+      // ---------------- effects (per object) ----------------
+
+      addEffect: (objectId, kind) =>
+        recordAnd((d) => ({
+          ...d,
+          layers: d.layers.map((l) => ({
+            ...l,
+            objects: l.objects.map((o) =>
+              o.id === objectId
+                ? ({ ...o, effects: [...o.effects, defaultEffectFor(kind, uid())] } as LayerObject)
+                : o,
+            ),
+          })),
+        })),
+
+      updateEffect: (objectId, effectId, patch) =>
+        recordAnd((d) => ({
+          ...d,
+          layers: d.layers.map((l) => ({
+            ...l,
+            objects: l.objects.map((o) =>
+              o.id === objectId
+                ? ({
+                    ...o,
+                    effects: o.effects.map((e) =>
+                      e.id === effectId
+                        ? ({
+                            ...e,
+                            ...patch,
+                            params: {
+                              ...e.params,
+                              ...((patch as { params?: object }).params ?? {}),
+                            },
+                          } as Effect)
+                        : e,
+                    ),
+                  } as LayerObject)
+                : o,
+            ),
+          })),
+        })),
+
+      removeEffect: (objectId, effectId) =>
+        recordAnd((d) => ({
+          ...d,
+          layers: d.layers.map((l) => ({
+            ...l,
+            objects: l.objects.map((o) =>
+              o.id === objectId
+                ? ({ ...o, effects: o.effects.filter((e) => e.id !== effectId) } as LayerObject)
+                : o,
+            ),
+          })),
+        })),
+
+      // ---------------- guides ----------------
+
+      addGuide: (g) => recordAnd((d) => ({ ...d, guides: [...(d.guides ?? []), { ...g }] })),
+      updateGuide: (index, g) =>
+        recordAnd((d) => {
+          const guides = [...(d.guides ?? [])];
+          if (index < 0 || index >= guides.length) return d;
+          guides[index] = { ...g };
+          return { ...d, guides };
+        }),
+      removeGuide: (index) =>
+        recordAnd((d) => {
+          const guides = [...(d.guides ?? [])];
+          if (index < 0 || index >= guides.length) return d;
+          guides.splice(index, 1);
+          return { ...d, guides };
+        }),
+      clearGuides: () => recordAnd((d) => ({ ...d, guides: [] })),
+
+      // ---------------- view + history ----------------
 
       setView: (patch) => set((s) => ({ view: { ...s.view, ...patch } })),
 
@@ -377,3 +706,10 @@ export const useEditor = create<EditorState>()(
     };
   }),
 );
+
+/** Helper for callers (PixiStage snap, etc.) that need flat object access. */
+export function flatObjects(doc: CanvasDoc): { layer: Layer; object: LayerObject }[] {
+  const out: { layer: Layer; object: LayerObject }[] = [];
+  for (const l of doc.layers) for (const o of l.objects) out.push({ layer: l, object: o });
+  return out;
+}

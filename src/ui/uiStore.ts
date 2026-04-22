@@ -1,7 +1,14 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-export type PanelKey = 'leftToolbar' | 'canvas' | 'layers' | 'properties' | 'effects';
+export type PanelKey =
+  | 'leftToolbar'
+  | 'canvas'
+  | 'layers'
+  | 'properties'
+  | 'effects'
+  | 'rulers'
+  | 'guides';
 
 export const PANEL_LABELS: Record<PanelKey, string> = {
   leftToolbar: 'Left toolbar',
@@ -9,9 +16,11 @@ export const PANEL_LABELS: Record<PanelKey, string> = {
   layers: 'Layers panel',
   properties: 'Properties panel',
   effects: 'Effects panel',
+  rulers: 'Rulers',
+  guides: 'Guides',
 };
 
-export type WindowKey = Exclude<PanelKey, 'leftToolbar'>;
+export type WindowKey = Exclude<PanelKey, 'leftToolbar' | 'rulers' | 'guides'>;
 
 export interface WindowRect {
   x: number;
@@ -48,6 +57,8 @@ export const useUI = create<UIState>()(
         layers: true,
         properties: true,
         effects: true,
+        rulers: true,
+        guides: true,
       },
       windows: initialWindowDefaults(),
       togglePanel: (key) => set((s) => ({ panels: { ...s.panels, [key]: !s.panels[key] } })),

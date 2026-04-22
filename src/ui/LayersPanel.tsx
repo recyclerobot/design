@@ -1,173 +1,287 @@
 import { useEffect, useRef, useState } from 'react';
 import { useEditor } from '../editor/store';
-import { importImageFiles } from '../editor/export';
 import type {
   BlendMode,
-  ImageLayer,
+  ImageObject,
   Layer,
-  ShapeLayer,
-  ShapeKind,
-  TextLayer,
+  LayerObject,
+  ShapeObject,
+  TextObject,
 } from '../editor/types';
 
 const BLENDS: BlendMode[] = ['normal', 'add', 'multiply', 'screen', 'overlay', 'darken', 'lighten'];
 
-const SHAPE_OPTIONS: { kind: ShapeKind; label: string }[] = [
-  { kind: 'rectangle', label: 'Rectangle' },
-  { kind: 'ellipse', label: 'Ellipse' },
-  { kind: 'triangle', label: 'Triangle' },
-  { kind: 'line', label: 'Line' },
-];
-
+/**
+ * Tree of layers (containers) with their child drawables. Click a layer to
+ * make it active; click an object to select it (auto-activates its layer).
+ * Drag-reorder works within layers (objects) and across the layer list.
+ */
 export function LayersPanel() {
   const layers = useEditor((s) => s.doc.layers);
-  const selected = useEditor((s) => s.selectedLayerId);
-  const select = useEditor((s) => s.selectLayer);
-  const update = useEditor((s) => s.updateLayer);
-  const remove = useEditor((s) => s.removeLayer);
-  const duplicate = useEditor((s) => s.duplicateLayer);
-  const moveToIndex = useEditor((s) => s.moveLayerToIndex);
-  const addText = useEditor((s) => s.addTextLayer);
-  const addEmpty = useEditor((s) => s.addEmptyLayer);
-  const addShape = useEditor((s) => s.addShapeLayer);
+  const selectedLayerId = useEditor((s) => s.selectedLayerId);
+  const selectedObjectId = useEditor((s) => s.selectedObjectId);
+  const additionalSelectedObjectIds = useEditor((s) => s.additionalSelectedObjectIds);
+  const selectLayer = useEditor((s) => s.selectLayer);
+  const selectObject = useEditor((s) => s.selectObject);
+  const updateLayer = useEditor((s) => s.updateLayer);
+  const updateObject = useEditor((s) => s.updateObject);
+  const removeLayer = useEditor((s) => s.removeLayer);
+  const duplicateLayer = useEditor((s) => s.duplicateLayer);
+  const moveLayerToIndex = useEditor((s) => s.moveLayerToIndex);
+  const moveObjectToIndex = useEditor((s) => s.moveObjectToIndex);
+  const moveObjectToLayer = useEditor((s) => s.moveObjectToLayer);
+  const removeObject = useEditor((s) => s.removeObject);
+  const duplicateObject = useEditor((s) => s.duplicateObject);
+  const addLayer = useEditor((s) => s.addLayer);
 
-  const ordered = [...layers].reverse();
+  const orderedLayers = [...layers].reverse();
 
-  const [dragId, setDragId] = useState<string | null>(null);
-  const [dropBeforeIndex, setDropBeforeIndex] = useState<number | null>(null);
+  // Per-layer collapsed state (default expanded).
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const toggleCollapsed = (id: string) =>
+    setCollapsed((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
-  const onDragStart = (e: React.DragEvent, id: string) => {
-    setDragId(id);
+  // Drag state: we track what kind of thing is being dragged + a target hint.
+  interface DragState {
+    kind: 'layer' | 'object';
+    /** id of the dragged thing */
+    id: string;
+    /** layerId of the dragged thing (for objects) */
+    sourceLayerId?: string;
+  }
+  const [drag, setDrag] = useState<DragState | null>(null);
+  /** drop target indicator: where the dragged item will be inserted. */
+  interface DropTarget {
+    kind: 'layer' | 'object';
+    /** for layer drops: the visual index in `orderedLayers` */
+    layerDisplayIndex?: number;
+    /** for object drops: the layer container + visual index within that layer */
+    layerId?: string;
+    objectDisplayIndex?: number;
+  }
+  const [drop, setDrop] = useState<DropTarget | null>(null);
+
+  const onDragStartLayer = (e: React.DragEvent, id: string) => {
+    setDrag({ kind: 'layer', id });
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', id);
   };
-  const onDragOverRow = (e: React.DragEvent, displayIndex: number) => {
-    if (!dragId) return;
+  const onDragOverLayerRow = (e: React.DragEvent, displayIndex: number) => {
+    if (!drag || drag.kind !== 'layer') return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const before = e.clientY < r.top + r.height / 2;
-    setDropBeforeIndex(before ? displayIndex : displayIndex + 1);
+    setDrop({
+      kind: 'layer',
+      layerDisplayIndex: before ? displayIndex : displayIndex + 1,
+    });
+  };
+  const onDragStartObject = (e: React.DragEvent, layerId: string, objectId: string) => {
+    setDrag({ kind: 'object', id: objectId, sourceLayerId: layerId });
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', objectId);
+  };
+  const onDragOverObjectRow = (e: React.DragEvent, layerId: string, displayIndex: number) => {
+    if (!drag || drag.kind !== 'object') return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const before = e.clientY < r.top + r.height / 2;
+    setDrop({
+      kind: 'object',
+      layerId,
+      objectDisplayIndex: before ? displayIndex : displayIndex + 1,
+    });
+  };
+  const onDragOverLayerBody = (e: React.DragEvent, layerId: string) => {
+    // Allow dropping an object onto an empty layer body.
+    if (!drag || drag.kind !== 'object') return;
+    const layer = layers.find((l) => l.id === layerId);
+    if (!layer || layer.objects.length > 0) return;
+    e.preventDefault();
+    setDrop({ kind: 'object', layerId, objectDisplayIndex: 0 });
   };
   const onDrop = () => {
-    if (dragId == null || dropBeforeIndex == null) {
-      setDragId(null);
-      setDropBeforeIndex(null);
+    if (!drag || !drop) {
+      setDrag(null);
+      setDrop(null);
       return;
     }
-    const len = layers.length;
-    const targetStoreIndex = len - dropBeforeIndex;
-    moveToIndex(dragId, targetStoreIndex);
-    setDragId(null);
-    setDropBeforeIndex(null);
+    if (drag.kind === 'layer' && drop.kind === 'layer' && drop.layerDisplayIndex != null) {
+      const targetStoreIndex = layers.length - drop.layerDisplayIndex;
+      moveLayerToIndex(drag.id, targetStoreIndex);
+    } else if (drag.kind === 'object' && drop.kind === 'object' && drop.layerId) {
+      // Convert visual index in the displayed (top-down) order back to the
+      // underlying bottom-up storage order.
+      const targetLayer = layers.find((l) => l.id === drop.layerId);
+      if (targetLayer) {
+        const targetStoreIndex = targetLayer.objects.length - (drop.objectDisplayIndex ?? 0);
+        if (drag.sourceLayerId === drop.layerId) {
+          moveObjectToIndex(drag.id, targetStoreIndex);
+        } else {
+          moveObjectToLayer(drag.id, drop.layerId, targetStoreIndex);
+        }
+      }
+    }
+    setDrag(null);
+    setDrop(null);
   };
   const onDragEnd = () => {
-    setDragId(null);
-    setDropBeforeIndex(null);
-  };
-
-  const onImportClick = () => {
-    const inp = document.createElement('input');
-    inp.type = 'file';
-    inp.accept = 'image/*';
-    inp.multiple = true;
-    inp.onchange = () => inp.files && importImageFiles(inp.files);
-    inp.click();
+    setDrag(null);
+    setDrop(null);
   };
 
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-col" onDrop={onDrop} onDragEnd={onDragEnd}>
-        {ordered.length === 0 ? (
+        {orderedLayers.length === 0 ? (
           <div className="px-1 py-2 text-zinc-500">
-            No layers yet. Use the buttons below to add one.
+            No layers yet. Add one below — or add a drawable to auto-create one.
           </div>
         ) : (
-          ordered.map((l, i) => (
+          orderedLayers.map((l, i) => (
             <div key={l.id}>
-              {dropBeforeIndex === i && <DropIndicator />}
-              <Row
+              {drop?.kind === 'layer' && drop.layerDisplayIndex === i && <DropIndicator />}
+              <LayerRow
                 layer={l}
-                isSelected={selected === l.id}
-                isDragging={dragId === l.id}
-                onSelect={() => select(l.id)}
-                onToggleVisible={() => update(l.id, { visible: !l.visible } as Partial<Layer>)}
-                onToggleLock={() => update(l.id, { locked: !l.locked } as Partial<Layer>)}
-                onRename={(name) => update(l.id, { name } as Partial<Layer>)}
-                onOpacity={(v) => update(l.id, { opacity: v } as Partial<Layer>)}
-                onBlend={(b) => update(l.id, { blendMode: b } as Partial<Layer>)}
-                onDuplicate={() => duplicate(l.id)}
-                onDelete={() => remove(l.id)}
-                onDragStart={(e) => onDragStart(e, l.id)}
-                onDragOver={(e) => onDragOverRow(e, i)}
+                isActive={selectedLayerId === l.id}
+                isCollapsed={collapsed.has(l.id)}
+                isDragging={drag?.kind === 'layer' && drag.id === l.id}
+                onToggleCollapsed={() => toggleCollapsed(l.id)}
+                onSelect={() => selectLayer(l.id)}
+                onToggleVisible={() => updateLayer(l.id, { visible: !l.visible })}
+                onToggleLock={() => updateLayer(l.id, { locked: !l.locked })}
+                onRename={(name) => updateLayer(l.id, { name })}
+                onOpacity={(v) => updateLayer(l.id, { opacity: v })}
+                onBlend={(b) => updateLayer(l.id, { blendMode: b })}
+                onDuplicate={() => duplicateLayer(l.id)}
+                onDelete={() => removeLayer(l.id)}
+                onDragStart={(e) => onDragStartLayer(e, l.id)}
+                onDragOver={(e) => onDragOverLayerRow(e, i)}
               />
+
+              {!collapsed.has(l.id) && (
+                <ObjectList
+                  layer={l}
+                  selectedObjectId={selectedObjectId}
+                  additionalSelectedObjectIds={additionalSelectedObjectIds}
+                  drop={drop}
+                  drag={drag}
+                  onDragOverLayerBody={(e) => onDragOverLayerBody(e, l.id)}
+                  onObjectDragStart={(e, oid) => onDragStartObject(e, l.id, oid)}
+                  onObjectDragOver={(e, idx) => onDragOverObjectRow(e, l.id, idx)}
+                  onObjectClick={(oid) => selectObject(oid)}
+                  onObjectToggleVisible={(oid, vis) => updateObject(oid, { visible: vis })}
+                  onObjectToggleLock={(oid, locked) => updateObject(oid, { locked })}
+                  onObjectRename={(oid, name) => updateObject(oid, { name })}
+                  onObjectOpacity={(oid, v) => updateObject(oid, { opacity: v })}
+                  onObjectBlend={(oid, b) => updateObject(oid, { blendMode: b })}
+                  onObjectDuplicate={(oid) => duplicateObject(oid)}
+                  onObjectDelete={(oid) => removeObject(oid)}
+                />
+              )}
             </div>
           ))
         )}
-        {dropBeforeIndex === ordered.length && <DropIndicator />}
+        {drop?.kind === 'layer' && drop.layerDisplayIndex === orderedLayers.length && (
+          <DropIndicator />
+        )}
       </div>
-      <div className="flex flex-wrap gap-1 border-t border-black/30 pt-2">
-        <AddBtn title="New empty layer" onClick={() => addEmpty()}>
-          ＋ Empty
-        </AddBtn>
-        <AddBtn title="New text layer (T)" onClick={() => addText()}>
-          ＋ Text
-        </AddBtn>
-        <AddBtn title="Import image" onClick={onImportClick}>
-          ＋ Image
-        </AddBtn>
-        <select
-          onChange={(e) => {
-            const v = e.target.value as ShapeKind | '';
-            if (v) addShape(v);
-            e.target.value = '';
-          }}
-          defaultValue=""
-          title="New shape"
-          className="rounded bg-panel-2 px-2 py-1 text-zinc-200 outline-none hover:bg-panel-3"
+      <div className="flex justify-end border-t border-black/30 pt-2">
+        <button
+          type="button"
+          onClick={() => addLayer()}
+          title="New layer"
+          className="grid h-6 w-6 place-items-center rounded text-zinc-300 hover:bg-panel-3 hover:text-zinc-100"
         >
-          <option value="" disabled>
-            ＋ Shape
-          </option>
-          {SHAPE_OPTIONS.map((s) => (
-            <option key={s.kind} value={s.kind}>
-              {s.label}
-            </option>
-          ))}
-        </select>
+          +
+        </button>
       </div>
     </div>
   );
 }
 
-function DropIndicator() {
-  return <div className="my-0.5 h-0.5 rounded bg-accent" />;
-}
-
-function AddBtn({
-  children,
-  onClick,
-  title,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  title: string;
+function ObjectList(props: {
+  layer: Layer;
+  selectedObjectId: string | null;
+  additionalSelectedObjectIds: string[];
+  drop: {
+    kind: 'layer' | 'object';
+    layerDisplayIndex?: number;
+    layerId?: string;
+    objectDisplayIndex?: number;
+  } | null;
+  drag: { kind: 'layer' | 'object'; id: string; sourceLayerId?: string } | null;
+  onDragOverLayerBody: (e: React.DragEvent) => void;
+  onObjectDragStart: (e: React.DragEvent, objectId: string) => void;
+  onObjectDragOver: (e: React.DragEvent, displayIndex: number) => void;
+  onObjectClick: (objectId: string) => void;
+  onObjectToggleVisible: (objectId: string, visible: boolean) => void;
+  onObjectToggleLock: (objectId: string, locked: boolean) => void;
+  onObjectRename: (objectId: string, name: string) => void;
+  onObjectOpacity: (objectId: string, value: number) => void;
+  onObjectBlend: (objectId: string, blend: BlendMode) => void;
+  onObjectDuplicate: (objectId: string) => void;
+  onObjectDelete: (objectId: string) => void;
 }) {
+  const { layer, drop } = props;
+  const orderedObjects = [...layer.objects].reverse();
+
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      className="rounded bg-panel-2 px-2 py-1 text-zinc-200 hover:bg-panel-3"
+    <div
+      className="ml-4 flex flex-col gap-px border-l border-black/30 pl-2"
+      onDragOver={props.onDragOverLayerBody}
     >
-      {children}
-    </button>
+      {orderedObjects.length === 0 ? (
+        <div className="py-1 text-[11px] italic text-zinc-500">empty</div>
+      ) : (
+        orderedObjects.map((o, i) => (
+          <div key={o.id}>
+            {drop?.kind === 'object' &&
+              drop.layerId === layer.id &&
+              drop.objectDisplayIndex === i && <DropIndicator small />}
+            <ObjectRow
+              object={o}
+              isPrimary={props.selectedObjectId === o.id}
+              isAdditional={props.additionalSelectedObjectIds.includes(o.id)}
+              isDragging={props.drag?.kind === 'object' && props.drag.id === o.id}
+              onSelect={() => props.onObjectClick(o.id)}
+              onToggleVisible={() => props.onObjectToggleVisible(o.id, !o.visible)}
+              onToggleLock={() => props.onObjectToggleLock(o.id, !o.locked)}
+              onRename={(name) => props.onObjectRename(o.id, name)}
+              onOpacity={(v) => props.onObjectOpacity(o.id, v)}
+              onBlend={(b) => props.onObjectBlend(o.id, b)}
+              onDuplicate={() => props.onObjectDuplicate(o.id)}
+              onDelete={() => props.onObjectDelete(o.id)}
+              onDragStart={(e) => props.onObjectDragStart(e, o.id)}
+              onDragOver={(e) => props.onObjectDragOver(e, i)}
+            />
+          </div>
+        ))
+      )}
+      {drop?.kind === 'object' &&
+        drop.layerId === layer.id &&
+        drop.objectDisplayIndex === orderedObjects.length && <DropIndicator small />}
+    </div>
   );
 }
 
-function Row(props: {
+function DropIndicator({ small }: { small?: boolean }) {
+  return <div className={`my-0.5 ${small ? 'h-px' : 'h-0.5'} rounded bg-accent`} />;
+}
+
+function LayerRow(props: {
   layer: Layer;
-  isSelected: boolean;
+  isActive: boolean;
+  isCollapsed: boolean;
   isDragging: boolean;
+  onToggleCollapsed: () => void;
   onSelect: () => void;
   onToggleVisible: () => void;
   onToggleLock: () => void;
@@ -179,7 +293,7 @@ function Row(props: {
   onDragStart: (e: React.DragEvent) => void;
   onDragOver: (e: React.DragEvent) => void;
 }) {
-  const { layer, isSelected, isDragging } = props;
+  const { layer, isActive, isDragging, isCollapsed } = props;
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(layer.name);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -207,25 +321,35 @@ function Row(props: {
       onDragOver={props.onDragOver}
       onClick={props.onSelect}
       className={`group flex items-center gap-1.5 rounded border p-1 ${
-        isSelected
-          ? 'border-accent bg-panel-3'
-          : 'border-transparent bg-panel-2/60 hover:bg-panel-3'
+        isActive ? 'border-accent bg-panel-3' : 'border-transparent bg-panel-2/60 hover:bg-panel-3'
       } ${isDragging ? 'opacity-40' : ''}`}
     >
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          props.onToggleCollapsed();
+        }}
+        className="grid h-5 w-5 place-items-center rounded text-zinc-500 hover:bg-panel-3 hover:text-zinc-200"
+        title={isCollapsed ? 'Expand' : 'Collapse'}
+      >
+        {isCollapsed ? '▸' : '▾'}
+      </button>
       <span
         className="cursor-grab select-none px-0.5 text-zinc-500 hover:text-zinc-300"
         title="Drag to reorder"
       >
         ⋮⋮
       </span>
-      <Thumb layer={layer} />
+      <span className="grid h-7 w-7 shrink-0 place-items-center rounded border border-black/40 bg-panel/80 text-zinc-300">
+        ☰
+      </span>
       <button
         onClick={(e) => {
           e.stopPropagation();
           props.onToggleVisible();
         }}
         className="grid h-5 w-5 place-items-center rounded text-[11px] hover:bg-panel-3"
-        title={layer.visible ? 'Hide' : 'Show'}
+        title={layer.visible ? 'Hide layer' : 'Show layer'}
       >
         {layer.visible ? '👁' : '–'}
       </button>
@@ -235,7 +359,7 @@ function Row(props: {
           props.onToggleLock();
         }}
         className="grid h-5 w-5 place-items-center rounded text-[11px] hover:bg-panel-3"
-        title={layer.locked ? 'Unlock' : 'Lock'}
+        title={layer.locked ? 'Unlock layer' : 'Lock layer'}
       >
         {layer.locked ? '🔒' : '🔓'}
       </button>
@@ -263,6 +387,7 @@ function Row(props: {
             title="Double-click to rename"
           >
             {layer.name}
+            <span className="ml-1 text-[10px] text-zinc-500">({layer.objects.length})</span>
           </button>
         )}
         <div className="flex items-center gap-1.5 text-[10px] text-zinc-500">
@@ -271,7 +396,7 @@ function Row(props: {
             onChange={(e) => props.onBlend(e.target.value as BlendMode)}
             onClick={(e) => e.stopPropagation()}
             className="rounded bg-transparent px-0.5 text-zinc-400 outline-none hover:bg-panel-3"
-            title="Blend mode"
+            title="Layer blend mode"
           >
             {BLENDS.map((b) => (
               <option key={b} value={b}>
@@ -279,18 +404,157 @@ function Row(props: {
               </option>
             ))}
           </select>
+          <div className="flex-1" />
+          <OpacityField value={layer.opacity} onChange={props.onOpacity} />
+        </div>
+      </div>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          props.onDuplicate();
+        }}
+        className="px-1 text-zinc-400 opacity-0 group-hover:opacity-100 hover:text-zinc-200"
+        title="Duplicate layer"
+      >
+        ⎘
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          props.onDelete();
+        }}
+        className="px-1 text-red-400 opacity-0 group-hover:opacity-100 hover:text-red-300"
+        title="Delete layer"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+function ObjectRow(props: {
+  object: LayerObject;
+  isPrimary: boolean;
+  isAdditional: boolean;
+  isDragging: boolean;
+  onSelect: () => void;
+  onToggleVisible: () => void;
+  onToggleLock: () => void;
+  onRename: (name: string) => void;
+  onOpacity: (v: number) => void;
+  onBlend: (b: BlendMode) => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
+  onDragStart: (e: React.DragEvent) => void;
+  onDragOver: (e: React.DragEvent) => void;
+}) {
+  const { object, isPrimary, isAdditional, isDragging } = props;
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState(object.name);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (renaming) {
+      setDraft(object.name);
+      requestAnimationFrame(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      });
+    }
+  }, [renaming, object.name]);
+
+  const commit = () => {
+    const v = draft.trim();
+    if (v && v !== object.name) props.onRename(v);
+    setRenaming(false);
+  };
+
+  return (
+    <div
+      draggable={!renaming}
+      onDragStart={props.onDragStart}
+      onDragOver={props.onDragOver}
+      onClick={(e) => {
+        e.stopPropagation();
+        props.onSelect();
+      }}
+      className={`group flex items-center gap-1.5 rounded border p-1 ${
+        isPrimary
+          ? 'border-accent bg-panel-3'
+          : isAdditional
+            ? 'border-accent/60 bg-panel-3/60'
+            : 'border-transparent bg-panel-2/40 hover:bg-panel-3'
+      } ${isDragging ? 'opacity-40' : ''}`}
+    >
+      <span
+        className="cursor-grab select-none px-0.5 text-zinc-500 hover:text-zinc-300"
+        title="Drag to reorder or move between layers"
+      >
+        ⋮⋮
+      </span>
+      <ObjectThumb object={object} />
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          props.onToggleVisible();
+        }}
+        className="grid h-5 w-5 place-items-center rounded text-[11px] hover:bg-panel-3"
+        title={object.visible ? 'Hide' : 'Show'}
+      >
+        {object.visible ? '👁' : '–'}
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          props.onToggleLock();
+        }}
+        className="grid h-5 w-5 place-items-center rounded text-[11px] hover:bg-panel-3"
+        title={object.locked ? 'Unlock' : 'Lock'}
+      >
+        {object.locked ? '🔒' : '🔓'}
+      </button>
+      <div className="flex min-w-0 flex-1 flex-col">
+        {renaming ? (
           <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.01}
-            value={layer.opacity}
-            onChange={(e) => props.onOpacity(parseFloat(e.target.value))}
+            ref={inputRef}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
             onClick={(e) => e.stopPropagation()}
-            className="h-1 flex-1 accent-accent"
-            title={`Opacity ${Math.round(layer.opacity * 100)}%`}
+            onBlur={commit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commit();
+              else if (e.key === 'Escape') setRenaming(false);
+            }}
+            className="w-full rounded bg-panel px-1 text-zinc-200 outline-none"
           />
-          <span className="w-7 text-right tabular-nums">{Math.round(layer.opacity * 100)}%</span>
+        ) : (
+          <button
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setRenaming(true);
+            }}
+            className="w-full truncate text-left text-zinc-200"
+            title="Double-click to rename"
+          >
+            {object.name}
+          </button>
+        )}
+        <div className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+          <select
+            value={object.blendMode}
+            onChange={(e) => props.onBlend(e.target.value as BlendMode)}
+            onClick={(e) => e.stopPropagation()}
+            className="rounded bg-transparent px-0.5 text-zinc-400 outline-none hover:bg-panel-3"
+            title="Object blend mode"
+          >
+            {BLENDS.map((b) => (
+              <option key={b} value={b}>
+                {b}
+              </option>
+            ))}
+          </select>
+          <div className="flex-1" />
+          <OpacityField value={object.opacity} onChange={props.onOpacity} />
         </div>
       </div>
       <button
@@ -317,26 +581,26 @@ function Row(props: {
   );
 }
 
-function Thumb({ layer }: { layer: Layer }) {
+function ObjectThumb({ object }: { object: LayerObject }) {
   const box =
     'grid h-7 w-7 shrink-0 place-items-center overflow-hidden rounded border border-black/40 bg-panel/80';
-  if (layer.type === 'image') {
-    const img = layer as ImageLayer;
+  if (object.type === 'image') {
+    const img = object as ImageObject;
     return (
       <div className={box}>
         <img src={img.src} alt="" className="h-full w-full object-contain" draggable={false} />
       </div>
     );
   }
-  if (layer.type === 'text') {
-    const t = layer as TextLayer;
+  if (object.type === 'text') {
+    const t = object as TextObject;
     return (
       <div className={box} style={{ color: t.color }}>
         <span style={{ fontFamily: t.fontFamily, fontWeight: t.fontWeight, fontSize: 14 }}>T</span>
       </div>
     );
   }
-  const s = layer as ShapeLayer;
+  const s = object as ShapeObject;
   const fill = s.fillColor ?? 'transparent';
   const stroke = s.strokeColor ?? 'transparent';
   const sw = Math.min(2, s.strokeWidth || 0);
@@ -385,5 +649,72 @@ function Thumb({ layer }: { layer: Layer }) {
         )}
       </svg>
     </div>
+  );
+}
+
+/**
+ * Click-to-edit opacity readout. Shows "NN%" and on click swaps to a numeric
+ * input that accepts 0–100. Commits on Enter or blur, cancels on Escape.
+ */
+function OpacityField({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (editing) {
+      const el = inputRef.current;
+      if (el) {
+        el.focus();
+        el.select();
+      }
+    }
+  }, [editing]);
+
+  const commit = () => {
+    const n = parseFloat(draft);
+    if (Number.isFinite(n)) {
+      const clamped = Math.max(0, Math.min(100, n));
+      onChange(clamped / 100);
+    }
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        type="number"
+        min={0}
+        max={100}
+        step={1}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === 'Enter') commit();
+          else if (e.key === 'Escape') setEditing(false);
+        }}
+        onBlur={commit}
+        className="w-12 rounded bg-panel-3 px-1 py-0.5 text-right tabular-nums text-zinc-100 outline-none"
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        setDraft(String(Math.round(value * 100)));
+        setEditing(true);
+      }}
+      title="Click to edit opacity"
+      className="w-12 rounded px-1 py-0.5 text-right tabular-nums text-zinc-300 hover:bg-panel-3"
+    >
+      {Math.round(value * 100)}%
+    </button>
   );
 }

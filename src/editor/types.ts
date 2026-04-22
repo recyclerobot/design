@@ -1,4 +1,12 @@
 // Editor data model.
+//
+// Conceptual model:
+//  - A `Layer` is a generic *container* with its own visibility, lock,
+//    opacity and blend mode. Layers live in `doc.layers` (bottom-up order).
+//  - Each layer owns an ordered list of `LayerObject`s — the actual drawables
+//    (image, text, shape). Each object has its own transform, opacity, blend
+//    mode, visibility, lock, and effects, and composes under its parent
+//    layer's properties.
 
 export type BlendMode = 'normal' | 'add' | 'multiply' | 'screen' | 'overlay' | 'darken' | 'lighten';
 
@@ -38,7 +46,7 @@ export type Effect =
   | EffectBase<'pixelate', { size: number }>
   | EffectBase<'tint', { color: string; amount: number }>;
 
-export interface BaseLayer {
+export interface BaseObject {
   id: string;
   name: string;
   type: 'image' | 'text' | 'shape';
@@ -56,7 +64,7 @@ export interface BaseLayer {
 
 export type ShapeKind = 'rectangle' | 'ellipse' | 'triangle' | 'line' | 'empty';
 
-export interface ShapeLayer extends BaseLayer {
+export interface ShapeObject extends BaseObject {
   type: 'shape';
   shape: ShapeKind;
   /** null = no fill */
@@ -68,16 +76,16 @@ export interface ShapeLayer extends BaseLayer {
   cornerRadius: number;
 }
 
-export interface ImageLayer extends BaseLayer {
+export interface ImageObject extends BaseObject {
   type: 'image';
-  /** Object URL for the loaded image. Owned by the layer; revoked on remove. */
+  /** Object URL or data URL for the loaded image. */
   src: string;
   /** Original natural dimensions, used for aspect lock. */
   naturalWidth: number;
   naturalHeight: number;
 }
 
-export interface TextLayer extends BaseLayer {
+export interface TextObject extends BaseObject {
   type: 'text';
   text: string;
   fontFamily: string;
@@ -87,7 +95,25 @@ export interface TextLayer extends BaseLayer {
   align: 'left' | 'center' | 'right';
 }
 
-export type Layer = ImageLayer | TextLayer | ShapeLayer;
+export type LayerObject = ImageObject | TextObject | ShapeObject;
+
+/** Generic container: holds a collection of drawable objects. */
+export interface Layer {
+  id: string;
+  name: string;
+  visible: boolean;
+  locked: boolean;
+  opacity: number;
+  blendMode: BlendMode;
+  /** Bottom-up order: index 0 renders behind, last renders in front. */
+  objects: LayerObject[];
+}
+
+export interface Guide {
+  axis: 'v' | 'h';
+  /** doc-space position along the perpendicular axis */
+  pos: number;
+}
 
 export interface CanvasDoc {
   widthPx: number;
@@ -95,6 +121,8 @@ export interface CanvasDoc {
   /** null = transparent */
   backgroundColor: string | null;
   layers: Layer[];
+  /** User-created ruler guides (Photoshop-style). */
+  guides: Guide[];
 }
 
 export interface ViewState {
@@ -108,4 +136,5 @@ export const DEFAULT_DOC: CanvasDoc = {
   heightPx: 768,
   backgroundColor: null,
   layers: [],
+  guides: [],
 };

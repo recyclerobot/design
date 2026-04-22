@@ -1,15 +1,21 @@
 import { useState } from 'react';
-import { useEditor } from '../editor/store';
+import { useEditor, flatObjects } from '../editor/store';
 import { ALL_EFFECT_KINDS, EFFECT_LABELS } from '../editor/effects';
 import type { Effect, EffectKind } from '../editor/types';
 
 export function EffectsPanel() {
-  const layer = useEditor((s) => s.doc.layers.find((l) => l.id === s.selectedLayerId));
+  const obj = useEditor((s) => {
+    if (!s.selectedObjectId) return undefined;
+    for (const { object } of flatObjects(s.doc)) {
+      if (object.id === s.selectedObjectId) return object;
+    }
+    return undefined;
+  });
   const addEffect = useEditor((s) => s.addEffect);
   const updateEffect = useEditor((s) => s.updateEffect);
   const removeEffect = useEditor((s) => s.removeEffect);
   const [adding, setAdding] = useState<EffectKind>('brightnessContrast');
-  if (!layer) return null;
+  if (!obj) return null;
 
   return (
     <div className="flex flex-col gap-2">
@@ -26,23 +32,23 @@ export function EffectsPanel() {
           ))}
         </select>
         <button
-          onClick={() => addEffect(layer.id, adding)}
+          onClick={() => addEffect(obj.id, adding)}
           className="rounded bg-accent px-2 py-1 text-white hover:opacity-90"
         >
           Add
         </button>
       </div>
 
-      {layer.effects.length === 0 && (
-        <div className="px-1 py-2 text-zinc-500">No effects on this layer.</div>
+      {obj.effects.length === 0 && (
+        <div className="px-1 py-2 text-zinc-500">No effects on this object.</div>
       )}
 
-      {layer.effects.map((e) => (
+      {obj.effects.map((e) => (
         <EffectCard
           key={e.id}
           effect={e}
-          onChange={(patch) => updateEffect(layer.id, e.id, patch)}
-          onRemove={() => removeEffect(layer.id, e.id)}
+          onChange={(patch) => updateEffect(obj.id, e.id, patch)}
+          onRemove={() => removeEffect(obj.id, e.id)}
         />
       ))}
     </div>

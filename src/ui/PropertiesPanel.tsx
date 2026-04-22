@@ -1,5 +1,5 @@
-import { useEditor } from '../editor/store';
-import type { Layer, ShapeLayer, TextLayer } from '../editor/types';
+import { useEditor, flatObjects } from '../editor/store';
+import type { ImageObject, LayerObject, ShapeObject, TextObject } from '../editor/types';
 
 const FONT_FAMILIES = [
   'Inter',
@@ -23,56 +23,115 @@ const FONT_FAMILIES = [
 ];
 
 export function PropertiesPanel() {
-  const layer = useEditor((s) => s.doc.layers.find((l) => l.id === s.selectedLayerId));
-  const update = useEditor((s) => s.updateLayer);
-  if (!layer) return null;
+  const obj = useEditor((s) => {
+    if (!s.selectedObjectId) return undefined;
+    for (const { object } of flatObjects(s.doc)) {
+      if (object.id === s.selectedObjectId) return object;
+    }
+    return undefined;
+  });
+  const update = useEditor((s) => s.updateObject);
+  if (!obj) return null;
 
-  const set = (patch: Partial<Layer>) => update(layer.id, patch);
+  const set = (patch: Partial<LayerObject>) => update(obj.id, patch);
 
   return (
     <div className="flex flex-col gap-2">
-      <Row label="X">
-        <Num value={layer.x} onChange={(v) => set({ x: v } as Partial<Layer>)} />
-      </Row>
-      <Row label="Y">
-        <Num value={layer.y} onChange={(v) => set({ y: v } as Partial<Layer>)} />
-      </Row>
-      <Row label="W">
-        <Num
-          value={layer.width}
-          onChange={(v) => set({ width: Math.max(1, v) } as Partial<Layer>)}
-        />
-      </Row>
-      <Row label="H">
-        <Num
-          value={layer.height}
-          onChange={(v) => set({ height: Math.max(1, v) } as Partial<Layer>)}
-        />
-      </Row>
+      <div className="grid grid-cols-2 gap-x-2 gap-y-1.5">
+        <CompactRow label="X">
+          <Num value={obj.x} onChange={(v) => set({ x: v } as Partial<LayerObject>)} />
+        </CompactRow>
+        <CompactRow label="Y">
+          <Num value={obj.y} onChange={(v) => set({ y: v } as Partial<LayerObject>)} />
+        </CompactRow>
+        <CompactRow label="W">
+          <Num
+            value={obj.width}
+            onChange={(v) => set({ width: Math.max(1, v) } as Partial<LayerObject>)}
+          />
+        </CompactRow>
+        <CompactRow label="H">
+          <Num
+            value={obj.height}
+            onChange={(v) => set({ height: Math.max(1, v) } as Partial<LayerObject>)}
+          />
+        </CompactRow>
+      </div>
       <Row label="Rot°">
         <Num
-          value={(layer.rotation * 180) / Math.PI}
-          onChange={(v) => set({ rotation: (v * Math.PI) / 180 } as Partial<Layer>)}
+          value={(obj.rotation * 180) / Math.PI}
+          onChange={(v) => set({ rotation: (v * Math.PI) / 180 } as Partial<LayerObject>)}
         />
       </Row>
 
-      {layer.type === 'text' && <TextProps layer={layer as TextLayer} />}
-      {layer.type === 'shape' && <ShapeProps layer={layer as ShapeLayer} />}
+      {obj.type === 'text' && <TextProps object={obj as TextObject} />}
+      {obj.type === 'shape' && <ShapeProps object={obj as ShapeObject} />}
+      {obj.type === 'image' && <ImageProps object={obj as ImageObject} />}
     </div>
   );
 }
 
-function ShapeProps({ layer }: { layer: ShapeLayer }) {
-  const update = useEditor((s) => s.updateLayer);
-  const set = (patch: Partial<ShapeLayer>) => update(layer.id, patch as Partial<Layer>);
-  const fillEnabled = layer.fillColor !== null;
-  const strokeEnabled = layer.strokeColor !== null;
+function ImageProps({ object }: { object: ImageObject }) {
+  const update = useEditor((s) => s.updateObject);
+  const nW = object.naturalWidth;
+  const nH = object.naturalHeight;
+  const curW = Math.round(object.width);
+  const curH = Math.round(object.height);
+  const scaleX = nW > 0 ? (object.width / nW) * 100 : 100;
+  const scaleY = nH > 0 ? (object.height / nH) * 100 : 100;
+  const atNatural = curW === nW && curH === nH;
+  return (
+    <div className="mt-2 flex flex-col gap-1.5 border-t border-black/30 pt-2">
+      <Row label="File">
+        <div className="truncate text-[11px] text-zinc-300" title={object.name}>
+          {object.name || 'Image'}
+        </div>
+      </Row>
+      <Row label="Original">
+        <div className="text-[11px] text-zinc-400">
+          {nW} × {nH} px
+        </div>
+      </Row>
+      <Row label="Current">
+        <div className="text-[11px] text-zinc-300">
+          {curW} × {curH} px
+          <span className="ml-2 text-zinc-500">
+            ({Math.round(scaleX)}% × {Math.round(scaleY)}%)
+          </span>
+        </div>
+      </Row>
+      <Row label="">
+        <button
+          type="button"
+          disabled={atNatural}
+          onClick={() =>
+            update(object.id, {
+              width: nW,
+              height: nH,
+              x: object.x + (object.width - nW) / 2,
+              y: object.y + (object.height - nH) / 2,
+            } as Partial<LayerObject>)
+          }
+          className="rounded bg-panel-2 px-2 py-1 text-[11px] text-zinc-200 hover:bg-panel-3 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Reset to original size
+        </button>
+      </Row>
+    </div>
+  );
+}
+
+function ShapeProps({ object }: { object: ShapeObject }) {
+  const update = useEditor((s) => s.updateObject);
+  const set = (patch: Partial<ShapeObject>) => update(object.id, patch as Partial<LayerObject>);
+  const fillEnabled = object.fillColor !== null;
+  const strokeEnabled = object.strokeColor !== null;
   return (
     <div className="mt-2 flex flex-col gap-2 border-t border-black/30 pt-2">
       <Row label="Shape">
         <select
-          value={layer.shape}
-          onChange={(e) => set({ shape: e.target.value as ShapeLayer['shape'] })}
+          value={object.shape}
+          onChange={(e) => set({ shape: e.target.value as ShapeObject['shape'] })}
           className="w-full rounded bg-panel-2 px-1 py-1 text-zinc-200 outline-none"
         >
           <option value="rectangle">Rectangle</option>
@@ -88,11 +147,11 @@ function ShapeProps({ layer }: { layer: ShapeLayer }) {
             type="checkbox"
             checked={fillEnabled}
             onChange={(e) => set({ fillColor: e.target.checked ? '#5865f2' : null })}
-            disabled={layer.shape === 'line' || layer.shape === 'empty'}
+            disabled={object.shape === 'line' || object.shape === 'empty'}
           />
           <input
             type="color"
-            value={layer.fillColor ?? '#5865f2'}
+            value={object.fillColor ?? '#5865f2'}
             disabled={!fillEnabled}
             onChange={(e) => set({ fillColor: e.target.value })}
             className="h-6 w-12 cursor-pointer rounded border border-black/30 bg-transparent disabled:opacity-40"
@@ -105,11 +164,11 @@ function ShapeProps({ layer }: { layer: ShapeLayer }) {
             type="checkbox"
             checked={strokeEnabled}
             onChange={(e) => set({ strokeColor: e.target.checked ? '#ffffff' : null })}
-            disabled={layer.shape === 'empty'}
+            disabled={object.shape === 'empty'}
           />
           <input
             type="color"
-            value={layer.strokeColor ?? '#ffffff'}
+            value={object.strokeColor ?? '#ffffff'}
             disabled={!strokeEnabled}
             onChange={(e) => set({ strokeColor: e.target.value })}
             className="h-6 w-12 cursor-pointer rounded border border-black/30 bg-transparent disabled:opacity-40"
@@ -117,25 +176,28 @@ function ShapeProps({ layer }: { layer: ShapeLayer }) {
         </div>
       </Row>
       <Row label="Stroke W">
-        <Num value={layer.strokeWidth} onChange={(v) => set({ strokeWidth: Math.max(0, v) })} />
+        <Num value={object.strokeWidth} onChange={(v) => set({ strokeWidth: Math.max(0, v) })} />
       </Row>
-      {layer.shape === 'rectangle' && (
+      {object.shape === 'rectangle' && (
         <Row label="Radius">
-          <Num value={layer.cornerRadius} onChange={(v) => set({ cornerRadius: Math.max(0, v) })} />
+          <Num
+            value={object.cornerRadius}
+            onChange={(v) => set({ cornerRadius: Math.max(0, v) })}
+          />
         </Row>
       )}
     </div>
   );
 }
 
-function TextProps({ layer }: { layer: TextLayer }) {
-  const update = useEditor((s) => s.updateLayer);
-  const set = (patch: Partial<TextLayer>) => update(layer.id, patch as Partial<Layer>);
+function TextProps({ object }: { object: TextObject }) {
+  const update = useEditor((s) => s.updateObject);
+  const set = (patch: Partial<TextObject>) => update(object.id, patch as Partial<LayerObject>);
   return (
     <div className="mt-2 flex flex-col gap-2 border-t border-black/30 pt-2">
       <Row label="Text">
         <textarea
-          value={layer.text}
+          value={object.text}
           onChange={(e) => set({ text: e.target.value })}
           className="h-16 w-full resize-none rounded bg-panel-2 px-1.5 py-1 text-zinc-200 outline-none"
         />
@@ -143,7 +205,7 @@ function TextProps({ layer }: { layer: TextLayer }) {
       <Row label="Font">
         <input
           list="font-family-options"
-          value={layer.fontFamily}
+          value={object.fontFamily}
           onChange={(e) => set({ fontFamily: e.target.value })}
           className="w-full rounded bg-panel-2 px-1.5 py-1 text-zinc-200 outline-none"
         />
@@ -154,23 +216,23 @@ function TextProps({ layer }: { layer: TextLayer }) {
         </datalist>
       </Row>
       <Row label="Size">
-        <Num value={layer.fontSize} onChange={(v) => set({ fontSize: Math.max(1, v) })} />
+        <Num value={object.fontSize} onChange={(v) => set({ fontSize: Math.max(1, v) })} />
       </Row>
       <Row label="Weight">
-        <Num value={layer.fontWeight} onChange={(v) => set({ fontWeight: v })} />
+        <Num value={object.fontWeight} onChange={(v) => set({ fontWeight: v })} />
       </Row>
       <Row label="Color">
         <input
           type="color"
-          value={layer.color}
+          value={object.color}
           onChange={(e) => set({ color: e.target.value })}
           className="h-6 w-12 cursor-pointer rounded border border-black/30 bg-transparent"
         />
       </Row>
       <Row label="Align">
         <select
-          value={layer.align}
-          onChange={(e) => set({ align: e.target.value as TextLayer['align'] })}
+          value={object.align}
+          onChange={(e) => set({ align: e.target.value as TextObject['align'] })}
           className="rounded bg-panel-2 px-1 py-0.5 text-zinc-200 outline-none"
         >
           <option value="left">Left</option>
@@ -187,6 +249,15 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
     <label className="grid grid-cols-[60px_1fr] items-center gap-2">
       <span className="text-[11px] text-zinc-400">{label}</span>
       <div>{children}</div>
+    </label>
+  );
+}
+
+function CompactRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="flex items-center gap-1.5">
+      <span className="w-3 shrink-0 text-[11px] text-zinc-400">{label}</span>
+      <div className="min-w-0 flex-1">{children}</div>
     </label>
   );
 }

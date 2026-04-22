@@ -3,6 +3,7 @@ import { PixiStage } from './editor/pixi/PixiStage';
 import { TopBar } from './ui/TopBar';
 import { LeftToolbar } from './ui/LeftToolbar';
 import { RightPanel } from './ui/RightPanel';
+import { Rulers } from './ui/Rulers';
 import { NewCanvasDialog } from './ui/NewCanvasDialog';
 import { ExportDialog } from './ui/ExportDialog';
 import { LibraryDialog } from './ui/LibraryDialog';
@@ -39,6 +40,7 @@ export default function App() {
         />
         {showLeftToolbar && <LeftToolbar />}
         <RightPanel />
+        <Rulers />
       </div>
 
       {showNew && <NewCanvasDialog onClose={() => setShowNew(false)} />}

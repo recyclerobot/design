@@ -1,5 +1,5 @@
 import { Graphics, Container } from 'pixi.js';
-import type { Layer } from '../types';
+import type { LayerObject } from '../types';
 
 const HANDLE_SIZE = 10;
 const HANDLE_COLOR = 0x5865f2;
@@ -39,7 +39,7 @@ export class TransformOverlay {
     this.container.visible = false;
   }
 
-  draw(layer: Layer, inverseZoom: number) {
+  draw(layer: LayerObject, inverseZoom: number) {
     this.container.visible = true;
     const { x, y, width, height, rotation } = layer;
     const cx = x + width / 2;
@@ -87,7 +87,7 @@ export class TransformOverlay {
   }
 
   /** Hit-test in doc space; returns which handle was hit, or null. */
-  hitTest(layer: Layer, docX: number, docY: number, inverseZoom: number): HandleId | null {
+  hitTest(layer: LayerObject, docX: number, docY: number, inverseZoom: number): HandleId | null {
     const cx = layer.x + layer.width / 2;
     const cy = layer.y + layer.height / 2;
     const dx = docX - cx;
