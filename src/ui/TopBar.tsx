@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useEditor } from '../editor/store';
 import { importImageFiles } from '../editor/export';
+import { exportProjectZip, importProjectZip } from '../editor/projectArchive';
 import { listActive, useLibrary } from '../library/libraryStore';
 import { PANEL_LABELS, useUI, type PanelKey } from './uiStore';
 
@@ -118,6 +119,36 @@ function FileMenu({ onNew, onOpenLibrary }: { onNew: () => void; onOpenLibrary: 
     }
   };
 
+  const exportProject = async () => {
+    setOpen(false);
+    try {
+      await exportProjectZip();
+    } catch (err) {
+      alert(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const importProject = () => {
+    setOpen(false);
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = '.zip,application/zip,.designproj';
+    inp.onchange = async () => {
+      const file = inp.files?.[0];
+      if (!file) return;
+      try {
+        // Flush any in-progress edits, then create a new library entry for
+        // the imported project so it does not clobber the open canvas.
+        useLibrary.getState().saveCurrent(useEditor.getState().doc);
+        await importProjectZip(file);
+        useLibrary.getState().createNew(useEditor.getState().doc, file.name.replace(/\.zip$/i, ''));
+      } catch (err) {
+        alert(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    inp.click();
+  };
+
   return (
     <div ref={ref} className="relative">
       <Btn onClick={() => setOpen((o) => !o)} title={current ? `File — ${current.name}` : 'File'}>
@@ -144,6 +175,11 @@ function FileMenu({ onNew, onOpenLibrary }: { onNew: () => void; onOpenLibrary: 
           <MenuItem onClick={archiveCurrent} disabled={!current}>
             Archive current canvas
           </MenuItem>
+          <div className="my-1 h-px bg-black/40" />
+          <MenuItem onClick={exportProject} disabled={!current}>
+            Export project (.zip)…
+          </MenuItem>
+          <MenuItem onClick={importProject}>Import project (.zip)…</MenuItem>
           <div className="my-1 h-px bg-black/40" />
           <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-zinc-500">Recent</div>
           {recent.length === 0 && (

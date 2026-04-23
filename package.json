@@ -14,8 +14,9 @@
     "prepare": "husky"
   },
   "dependencies": {
-    "pixi.js": "^8.6.6",
+    "jszip": "^3.10.1",
     "pixi-filters": "^6.1.4",
+    "pixi.js": "^8.6.6",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "zustand": "^5.0.2"
