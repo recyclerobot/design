@@ -1,4 +1,4 @@
-# Design — WebGL Image Editor
+# Photo — WebGL Image Editor
 
 A full-page WebGL (PixiJS v8) image editor in the browser. Vite + React + TypeScript. Deploys to GitHub Pages from the `docs/` folder.
 
